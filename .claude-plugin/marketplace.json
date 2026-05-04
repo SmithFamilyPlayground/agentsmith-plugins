@@ -43,6 +43,13 @@
       "description": "Lifecycle channel for AgentSmith — push-only Claude Code channel plugin (declares claude/channel only; no tools, no permission relay). Reads NDJSON over a Unix domain socket from a local supervisor process and emits operational nudges (idle_check, context_pressure, health_pulse, external_event) as <channel source=\"agentsmith-comms\"> notifications. Companion to the existing telegram channel — user-facing comms stay on telegram, lifecycle nudges are isolated here.",
       "category": "channel",
       "keywords": ["channel", "mcp", "lifecycle", "uds", "push-only", "agentsmith"]
+    },
+    {
+      "name": "agentsmith-self-deploy",
+      "source": "./plugins/agentsmith-self-deploy",
+      "description": "Self-deploy ritual for the `tod-smith` fly app — pre-flight checklist (target detection, WIP push, all-agents-idle gate via `agentsmith-svc /state`, breadcrumb to state.md), the `gh pr create --base prod` merge, and the post-respawn hello format pulled from the runtime sidecar. Never runs `flyctl deploy` directly. Tod-only today; extends to Smith if needed.",
+      "category": "deployment",
+      "keywords": ["self-deploy", "fly.io", "checklist", "tod", "agentsmith"]
     }
   ]
 }
