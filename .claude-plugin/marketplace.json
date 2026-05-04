@@ -40,9 +40,16 @@
     {
       "name": "agentsmith-comms",
       "source": "./plugins/agentsmith-comms",
-      "description": "Lifecycle channel for AgentSmith — push-only Claude Code channel plugin (declares claude/channel only; no tools, no permission relay). Reads NDJSON over a Unix domain socket from a local supervisor process and emits operational nudges (idle_check, context_pressure, health_pulse, external_event) as <channel source=\"agentsmith-comms\"> notifications. Companion to the existing telegram channel — user-facing comms stay on telegram, lifecycle nudges are isolated here.",
+      "description": "Lifecycle channel + cross-agent RPC layer for AgentSmith. The channel surface is push-only: reads NDJSON over a Unix domain socket from a local supervisor and emits operational nudges (idle_check, context_pressure, health_pulse, external_event) as <channel source=\"agentsmith-comms\"> notifications. The tool surface (currently `whoami`) is a tiny RPC layer for self-probes — `whoami` wraps the Telegram Bot API getMe so an MCP-health round-trip can be checked silently without touching any chat. Building block for tiered clear-vs-respawn lifecycle decisions.",
       "category": "channel",
-      "keywords": ["channel", "mcp", "lifecycle", "uds", "push-only", "agentsmith"]
+      "keywords": ["channel", "mcp", "lifecycle", "uds", "rpc", "whoami", "agentsmith"]
+    },
+    {
+      "name": "agentsmith-self-deploy",
+      "source": "./plugins/agentsmith-self-deploy",
+      "description": "Self-deploy ritual for the `tod-smith` fly app — pre-flight checklist (target detection, WIP push, all-agents-idle gate via `agentsmith-svc /state`, breadcrumb to state.md), the `gh pr create --base prod` merge, and the post-respawn hello format pulled from the runtime sidecar. Never runs `flyctl deploy` directly. Tod-only today; extends to Smith if needed.",
+      "category": "deployment",
+      "keywords": ["self-deploy", "fly.io", "checklist", "tod", "agentsmith"]
     }
   ]
 }
