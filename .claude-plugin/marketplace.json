@@ -43,6 +43,13 @@
       "description": "Lifecycle channel for AgentSmith — push-only Claude Code channel plugin (declares claude/channel only; no tools, no permission relay). Reads NDJSON over a Unix domain socket from a local supervisor process and emits operational nudges (idle_check, context_pressure, health_pulse, external_event) as <channel source=\"agentsmith-comms\"> notifications. Companion to the existing telegram channel — user-facing comms stay on telegram, lifecycle nudges are isolated here.",
       "category": "channel",
       "keywords": ["channel", "mcp", "lifecycle", "uds", "push-only", "agentsmith"]
+    },
+    {
+      "name": "claude-persistent-memory",
+      "source": "./plugins/claude-persistent-memory",
+      "description": "Continuity-of-self memory for persistent-identity Claude Code agents. Phase-1a MVP — ships a bundled `local-vault` CLI implementing the Memory.* contract (store/recall/update/list/config) against a local project vault at `<project>/.claude-persistent-memory/`, so the plugin works standalone on any project from day one (no AgentSmith / no svc / no api dependency). Phase-1b will add the dreaming-model hooks (state.md @-import + recall + consolidate-and-restart + context-pressure); phase-1c will add auto-detect-and-route to an `agentsmith-api` backend when present.",
+      "category": "workflow",
+      "keywords": ["memory", "persistent-identity", "state.md", "continuity", "local-vault", "standalone", "agentsmith"]
     }
   ]
 }
