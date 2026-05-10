@@ -212,10 +212,15 @@ cpm_git_commit() {
         # Nothing actually changed (e.g. identical re-store).
         return 0
     fi
+    # Pathspec-scoped commit (Jax review HIGH-2). Without `-- "$@"`
+    # this `git commit` would sweep any operator-pre-staged unrelated
+    # files into the cpm commit message, silently. With the pathspec,
+    # only the cpm-touched paths land in the new commit; pre-staged
+    # other entries stay in the index for the operator's next commit.
     if ! git -C "$repo_root" \
         -c user.name="${CPM_GIT_USER_NAME:-claude-persistent-memory}" \
         -c user.email="${CPM_GIT_USER_EMAIL:-noreply@local}" \
-        commit -m "$message" --quiet 2>/dev/null
+        commit -m "$message" --quiet -- "$@" 2>/dev/null
     then
         cpm_warn "git commit failed; file written but not committed"
         return 0
@@ -241,6 +246,9 @@ cpm_init() {
     if [ -z "$identity" ]; then
         identity="default"
     fi
+    # Path-traversal defense (Jax review HIGH-1): --identity becomes
+    # a directory under $path and a slot in every emitted memory_id.
+    _cpm_validate_id_segment init identity "$identity"
     mkdir -p "$path/$identity/topics" "$path/$identity/notes" "$path/$identity/conversations"
     # Write a stub config.toml only if absent.
     if [ ! -f "$path/config.toml" ]; then
@@ -323,7 +331,12 @@ EOF
 }
 
 cpm_store_cmd() {
-    local content="" kind="note" topic="" slot="" privacy="family-internal" path=""
+    # NOTE on default sentinels: privacy and topic default to the empty
+    # string here so cpm_store can distinguish "operator didn't pass
+    # --privacy" (preserve existing on re-store; default to
+    # family-internal on first-store) from "operator explicitly passed
+    # --privacy family-internal" (always set). See Jax review MEDIUM.
+    local content="" kind="note" topic="" slot="" privacy="" path=""
     local positional_seen=0
     while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -357,10 +370,15 @@ cpm_store_cmd() {
         state|summary|note|archive) ;;
         *) cpm_die "store: invalid --kind '$kind' (state|summary|note|archive)" ;;
     esac
-    case "$privacy" in
-        public|family-internal|private) ;;
-        *) cpm_die "store: invalid --privacy '$privacy' (public|family-internal|private)" ;;
-    esac
+    # Empty privacy means "not set on the command line" — cpm_store
+    # decides whether to fall back to the existing-frontmatter value
+    # (re-store) or to the default (first-store).
+    if [ -n "$privacy" ]; then
+        case "$privacy" in
+            public|family-internal|private) ;;
+            *) cpm_die "store: invalid --privacy '$privacy' (public|family-internal|private)" ;;
+        esac
+    fi
     if [ "$kind" = "summary" ] && [ -z "$topic" ]; then
         cpm_die "store: --topic is required when --kind=summary"
     fi

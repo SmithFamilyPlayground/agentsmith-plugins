@@ -21,6 +21,12 @@
 cpm_store() {
     local vault="$1" slot="$2" kind="$3" topic="$4" privacy="$5" content="$6"
 
+    # Path-traversal defense: slot flows directly into the on-disk path
+    # and into the emitted memory_id. Reject `..`, `/`, hidden-form, etc.
+    # before constructing any path. (Defined in lib/update.sh.) See
+    # Jax review on PR #12 (HIGH-1).
+    _cpm_validate_id_segment store slot "$slot"
+
     local id rel_path abs_path memory_id slot_dir
     slot_dir="$vault/$slot"
     if [ ! -d "$slot_dir" ]; then
@@ -63,7 +69,13 @@ cpm_store() {
     abs_path="$vault/$rel_path"
     mkdir -p "$(dirname "$abs_path")"
 
-    # Preserve a created: stamp if the file already exists; else mint a new one.
+    # Preserve existing frontmatter where the caller didn't override it
+    # (Jax review MEDIUM). Re-storing a state.md or summary without
+    # passing --privacy must NOT silently reset privacy to the default
+    # "family-internal"; same for topic (which is also caller-supplied
+    # but optional). `created` is always carried forward when present.
+    # Note: `privacy` is the empty string when the caller did not pass
+    # --privacy on the command line (sentinel from cpm_store_cmd).
     local now created
     now="$(cpm_iso_now)"
     if [ -f "$abs_path" ]; then
@@ -71,9 +83,27 @@ cpm_store() {
         if [ -z "$created" ]; then
             created="$now"
         fi
+        if [ -z "$privacy" ]; then
+            privacy="$(_cpm_extract_frontmatter_field "$abs_path" privacy)"
+        fi
+        if [ -z "$topic" ]; then
+            topic="$(_cpm_extract_frontmatter_field "$abs_path" topic)"
+        fi
     else
         created="$now"
     fi
+    # Apply defaults for anything still empty (first-store path, or
+    # re-store of a file whose existing frontmatter is empty for the
+    # field).
+    if [ -z "$privacy" ]; then
+        privacy="family-internal"
+    fi
+    # Final privacy validation (defends against malformed existing
+    # frontmatter feeding back into the writer).
+    case "$privacy" in
+        public|family-internal|private) ;;
+        *) cpm_die "store: privacy value '$privacy' (from existing frontmatter or caller) is invalid" ;;
+    esac
 
     # Frontmatter envelope. Topic field is empty-string when absent
     # (rather than missing) so the schema is stable.

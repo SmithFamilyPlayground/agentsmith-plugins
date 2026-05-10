@@ -13,12 +13,28 @@ cpm_update() {
 
     # Resolve memory_id → relative path.
     # Format: <slot>/<kind>/<id>
+    #
+    # Defensive parse: must be exactly three `/`-separated segments and
+    # each segment must be a safe slug. `read -r` with three vars puts
+    # everything-after-the-second-/ into `id`, so a hostile id like
+    # `<slot>/<kind>/../../etc/shadow` would slip through without the
+    # explicit `..`/`/` rejection in _cpm_validate_id_segment. See
+    # Jax review on PR #12 (HIGH-1).
     local slot kind id
     IFS='/' read -r slot kind id <<EOF
 $memory_id
 EOF
     if [ -z "$slot" ] || [ -z "$kind" ] || [ -z "$id" ]; then
         cpm_die "update: malformed memory_id '$memory_id' (expected <slot>/<kind>/<id>)"
+    fi
+    # Reject any traversal-enabling content in any segment. We also
+    # re-check that the memory_id had no extra `/`s past the second by
+    # comparing the reassembly back to the input.
+    _cpm_validate_id_segment update slot "$slot"
+    _cpm_validate_id_segment update kind "$kind"
+    _cpm_validate_id_segment update id   "$id"
+    if [ "$slot/$kind/$id" != "$memory_id" ]; then
+        cpm_die "update: malformed memory_id '$memory_id' (extra path separators)"
     fi
 
     local rel_path abs_path
@@ -56,8 +72,15 @@ EOF
     # shellcheck disable=SC2064
     trap "rm -f '$tmp'" EXIT
 
-    awk -v patch="$patch" -v now="$now" '
-        BEGIN { in_fm = 0; started_fm = 0; emitted_body = 0 }
+    # Pass `patch` via ENVIRON to avoid awk's `-v` escape-sequence
+    # rewriting (Jax review HIGH-3). With `-v patch="$patch"`, awk
+    # re-interprets `\n`, `\t`, `\\`, `\NNN`, etc. in the value, silently
+    # corrupting any user content with literal backslashes (code snippets,
+    # regex, JSON, Windows paths). ENVIRON bypasses that pass.
+    # `now` is a controlled ISO timestamp (digits + `-:TZ`) so `-v` is
+    # safe for it.
+    CPM_UPDATE_PATCH="$patch" awk -v now="$now" '
+        BEGIN { in_fm = 0; started_fm = 0; emitted_body = 0; patch = ENVIRON["CPM_UPDATE_PATCH"] }
         /^---[[:space:]]*$/ {
             if (!started_fm) { in_fm = 1; started_fm = 1; print; next }
             if (in_fm) {
@@ -93,4 +116,31 @@ EOF
     fi
 
     printf '%s\n' "$memory_id"
+}
+
+# Validate that a memory_id segment (slot, kind, or id) is a safe slug —
+# nothing that could enable path traversal or shell metacharacter abuse.
+#
+# Allowed: letters, digits, dot (not leading), hyphen, underscore.
+# Rejected: empty, `.`, `..`, anything containing `/` or other meta
+# (handled by the positive regex), and any leading-dot form (which
+# could mask hidden files / `..`).
+#
+# Args:
+#   $1  subcommand label (for the error message)
+#   $2  segment name (slot/kind/id — for the error message)
+#   $3  the segment value
+_cpm_validate_id_segment() {
+    local where="$1" name="$2" value="$3"
+    if [ -z "$value" ]; then
+        cpm_die "$where: empty $name segment in memory_id"
+    fi
+    case "$value" in
+        .|..) cpm_die "$where: $name segment must not be '.' or '..'" ;;
+        .*)   cpm_die "$where: $name segment '$value' must not start with '.'" ;;
+    esac
+    # Positive pattern: only [A-Za-z0-9._-] from start to end.
+    if ! printf '%s' "$value" | LC_ALL=C grep -qE '^[A-Za-z0-9._-]+$'; then
+        cpm_die "$where: $name segment '$value' contains disallowed characters (allowed: [A-Za-z0-9._-])"
+    fi
 }

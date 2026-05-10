@@ -233,6 +233,222 @@ COMMITS="$(git -C "$WORK" log --oneline | wc -l | tr -d ' ')"
 multi_commits() { [ "$COMMITS" -ge 6 ]; }
 assert "produced multiple commits ($COMMITS)" multi_commits
 
+# --- Regression suite for Jax cross-vendor findings on PR #12. --------------
+# Each block below targets one of the HIGH / MEDIUM findings and asserts
+# the fix holds. Keep these even if individual blocks look small — they
+# guard against silent regression on the same shapes Jax flagged.
+
+printf '\n=== HIGH-1: path-traversal memory_id rejection ===\n'
+
+# `update <slot>/<kind>/<id>` with traversal bits in any segment must
+# fail with a "malformed" / "disallowed" / "must not be" error and
+# leave the file system untouched. We don't need to exhaust every
+# pattern — a representative `..` segment, a `/` smuggle, and a
+# leading-`.` segment cover the surface.
+
+# Plant a sentinel "outside-the-vault" file we want to prove untouched.
+SENTINEL="$WORK/SHOULD_NOT_BE_TOUCHED"
+printf 'original-content\n' > "$SENTINEL"
+SENTINEL_BEFORE="$(cat "$SENTINEL")"
+
+# Case A: classic `..` traversal in id segment (e.g. trying to land
+# on a file outside the slot). The defensive validator can fire on
+# any of "must not be", "must not start with", or "disallowed" depending
+# on which rule the segment trips first — all are acceptable rejections.
+if TRAV_A="$("$CLI" update "smoke/note/..%2Ffoo" "evil" 2>&1)"; then
+    FAIL=$((FAIL + 1)); printf '  FAIL  traversal id (encoded) should fail\n' >&2
+else
+    case "$TRAV_A" in
+        *disallowed*|*"must not be"*|*"must not start with"*|*malformed*)
+            PASS=$((PASS + 1)); printf '  PASS  encoded-slash id rejected\n' ;;
+        *)
+            FAIL=$((FAIL + 1)); printf '  FAIL  encoded-slash id error unclear: %s\n' "$TRAV_A" >&2 ;;
+    esac
+fi
+
+# Case B: extra `/` past the second separator. The naive `read -r slot kind id`
+# would put `note/../../SHOULD_NOT_BE_TOUCHED` into `id`; we reject on
+# the reassembly mismatch OR the disallowed-chars check.
+if TRAV_B="$("$CLI" update "smoke/note/../../SHOULD_NOT_BE_TOUCHED" "evil" 2>&1)"; then
+    FAIL=$((FAIL + 1)); printf '  FAIL  multi-segment traversal should fail\n' >&2
+else
+    case "$TRAV_B" in
+        *malformed*|*disallowed*|*"must not"*)
+            PASS=$((PASS + 1)); printf '  PASS  multi-segment traversal rejected\n' ;;
+        *)
+            FAIL=$((FAIL + 1)); printf '  FAIL  traversal error message unclear: %s\n' "$TRAV_B" >&2 ;;
+    esac
+fi
+
+# Case C: leading-dot slot via the `update` parser (`.hidden/...`).
+if TRAV_C="$("$CLI" update ".hidden/note/abc" "evil" 2>&1)"; then
+    FAIL=$((FAIL + 1)); printf '  FAIL  leading-dot slot should fail\n' >&2
+else
+    assert_contains "leading-dot slot rejected" "must not start with" "$TRAV_C"
+fi
+
+# Case D: `--slot ..` for `list`/`recall`/`store` must also fail.
+if TRAV_D="$("$CLI" list --slot .. 2>&1)"; then
+    FAIL=$((FAIL + 1)); printf '  FAIL  list --slot .. should fail\n' >&2
+else
+    assert_contains "list --slot .. rejected" "must not be" "$TRAV_D"
+fi
+
+# Case E: `--identity ..` for `init` must fail before any directory is
+# created. Use a throwaway sub-path so we can verify nothing landed.
+TRAV_INIT_DIR="$WORK/trav-init-target"
+if TRAV_E="$("$CLI" init --path "$TRAV_INIT_DIR" --identity .. 2>&1)"; then
+    FAIL=$((FAIL + 1)); printf '  FAIL  init --identity .. should fail\n' >&2
+else
+    assert_contains "init --identity .. rejected" "must not be" "$TRAV_E"
+fi
+
+# Sentinel must be byte-identical to before any of the traversal attempts.
+SENTINEL_AFTER="$(cat "$SENTINEL")"
+if [ "$SENTINEL_BEFORE" = "$SENTINEL_AFTER" ]; then
+    PASS=$((PASS + 1)); printf '  PASS  sentinel file outside vault untouched\n'
+else
+    FAIL=$((FAIL + 1)); printf '  FAIL  sentinel file was clobbered by traversal\n' >&2
+fi
+
+printf '\n=== HIGH-2: git commit pathspec-scoped ===\n'
+
+# Operator pre-stages an unrelated file. cpm Store/Update must commit
+# ONLY its own paths, leaving the pre-staged file in the index for the
+# operator's next commit. We assert (a) the cpm commit subject does not
+# also contain the unrelated path, and (b) the unrelated file is still
+# in the index after the cpm commit.
+
+UNRELATED="$WORK/unrelated-operator-work.txt"
+printf 'operator was mid-edit\n' > "$UNRELATED"
+git -C "$WORK" add -- "$UNRELATED"
+
+# Pre-condition: unrelated IS staged.
+git -C "$WORK" diff --cached --quiet -- "$UNRELATED" && {
+    FAIL=$((FAIL + 1)); printf '  FAIL  pre-condition: unrelated file not staged\n' >&2
+}
+
+PATHSPEC_NOTE_ID="$("$CLI" store "pathspec test body" --kind note --slot smoke)"
+COMMIT_FILES="$(git -C "$WORK" show --name-only --format= HEAD)"
+
+# (a) cpm commit should not have included the unrelated file.
+case "$COMMIT_FILES" in
+    *"unrelated-operator-work.txt"*)
+        FAIL=$((FAIL + 1)); printf '  FAIL  cpm commit swept unrelated pre-staged file\n' >&2 ;;
+    *)
+        PASS=$((PASS + 1)); printf '  PASS  cpm commit excluded pre-staged unrelated file\n' ;;
+esac
+
+# (b) Unrelated file should still be staged.
+if git -C "$WORK" diff --cached --quiet -- "$UNRELATED"; then
+    FAIL=$((FAIL + 1)); printf '  FAIL  pre-staged file lost from index after cpm commit\n' >&2
+else
+    PASS=$((PASS + 1)); printf '  PASS  pre-staged file remains in index after cpm commit\n'
+fi
+
+# Cleanup so subsequent assertions start from a clean index.
+git -C "$WORK" reset --quiet HEAD -- "$UNRELATED" 2>/dev/null || true
+rm -f "$UNRELATED"
+
+# Quiet shellcheck on the unused id capture (kept for diagnostic clarity).
+: "$PATHSPEC_NOTE_ID"
+
+printf '\n=== HIGH-3: awk update preserves literal backslashes ===\n'
+
+# Patch containing literal backslashes (\n, \t, \\, JSON-escape forms,
+# Windows path). The bytes on disk must match the input exactly — no
+# silent \n → LF rewriting.
+BACKSLASH_BODY='line1\nline2 keep_literal_\t and \\ double and "json\"quote" and C:\Users\path'
+ESCAPE_TARGET_ID="$NOTE_ID"
+printf '%s' "$BACKSLASH_BODY" | "$CLI" update "$ESCAPE_TARGET_ID" >/dev/null
+ESCAPE_TARGET_FILE="$NOTE_FILE"
+
+# Body lives between the closing `---` and EOF; awk-extract it once
+# and compare bytewise.
+ESCAPE_AFTER="$(awk '
+    BEGIN { in_fm = 0; started = 0; past = 0 }
+    /^---[[:space:]]*$/ {
+        if (!started) { in_fm = 1; started = 1; next }
+        if (in_fm) { in_fm = 0; past = 1; next }
+    }
+    past { print }
+' "$ESCAPE_TARGET_FILE")"
+
+# Body has a trailing newline from cpm_store/update's printf; the
+# stored body should still contain our literal backslashes.
+case "$ESCAPE_AFTER" in
+    *'\n'*) PASS=$((PASS + 1)); printf '  PASS  literal \\n preserved\n' ;;
+    *) FAIL=$((FAIL + 1)); printf '  FAIL  literal \\n lost (got: %s)\n' "$ESCAPE_AFTER" >&2 ;;
+esac
+case "$ESCAPE_AFTER" in
+    *'\t'*) PASS=$((PASS + 1)); printf '  PASS  literal \\t preserved\n' ;;
+    *) FAIL=$((FAIL + 1)); printf '  FAIL  literal \\t lost\n' >&2 ;;
+esac
+# shellcheck disable=SC1003
+# We literally want to glob for two backslashes in a row, not escape
+# a quote. SC1003 misfires on single-quoted glob patterns.
+case "$ESCAPE_AFTER" in
+    *'\\'*) PASS=$((PASS + 1)); printf '  PASS  literal \\\\ preserved\n' ;;
+    *) FAIL=$((FAIL + 1)); printf '  FAIL  literal \\\\ collapsed\n' >&2 ;;
+esac
+case "$ESCAPE_AFTER" in
+    *'C:\Users\path'*) PASS=$((PASS + 1)); printf '  PASS  Windows path preserved\n' ;;
+    *) FAIL=$((FAIL + 1)); printf '  FAIL  Windows path mangled\n' >&2 ;;
+esac
+
+printf '\n=== MEDIUM: frontmatter preserved on state/summary re-store ===\n'
+
+# (1) state re-store without --privacy must NOT reset privacy.
+# Tighten privacy via an explicit Memory.Store call.
+printf 'private state body' | "$CLI" store - --kind state --slot smoke --privacy private >/dev/null
+STATE_PATH="$VAULT/smoke/state.md"
+STATE_PRIV_BEFORE="$(grep '^privacy:' "$STATE_PATH" | head -1 | awk '{print $2}')"
+assert "privacy: private set on state re-store" test "$STATE_PRIV_BEFORE" = "private"
+
+# Now re-store WITHOUT --privacy — must preserve `private`, not reset
+# to `family-internal`.
+printf 'updated state body, no privacy passed' | "$CLI" store - --kind state --slot smoke >/dev/null
+STATE_PRIV_AFTER="$(grep '^privacy:' "$STATE_PATH" | head -1 | awk '{print $2}')"
+if [ "$STATE_PRIV_AFTER" = "private" ]; then
+    PASS=$((PASS + 1)); printf '  PASS  state re-store preserved privacy=private\n'
+else
+    FAIL=$((FAIL + 1)); printf '  FAIL  state re-store reset privacy to %s\n' "$STATE_PRIV_AFTER" >&2
+fi
+
+# (2) summary re-store: same rule. First set privacy: private.
+"$CLI" store "fm-preserve summary v1" --kind summary --topic fm-preserve --slot smoke --privacy private >/dev/null
+FM_PATH="$VAULT/smoke/topics/fm-preserve.md"
+FM_PRIV_BEFORE="$(grep '^privacy:' "$FM_PATH" | head -1 | awk '{print $2}')"
+assert "summary first-store with --privacy private" test "$FM_PRIV_BEFORE" = "private"
+
+# Re-store without --privacy. Must keep private.
+"$CLI" store "fm-preserve summary v2" --kind summary --topic fm-preserve --slot smoke >/dev/null
+FM_PRIV_AFTER="$(grep '^privacy:' "$FM_PATH" | head -1 | awk '{print $2}')"
+if [ "$FM_PRIV_AFTER" = "private" ]; then
+    PASS=$((PASS + 1)); printf '  PASS  summary re-store preserved privacy=private\n'
+else
+    FAIL=$((FAIL + 1)); printf '  FAIL  summary re-store reset privacy to %s\n' "$FM_PRIV_AFTER" >&2
+fi
+
+# (3) Explicit --privacy on re-store DOES override existing.
+"$CLI" store "fm-preserve summary v3" --kind summary --topic fm-preserve --slot smoke --privacy public >/dev/null
+FM_PRIV_OVERRIDE="$(grep '^privacy:' "$FM_PATH" | head -1 | awk '{print $2}')"
+if [ "$FM_PRIV_OVERRIDE" = "public" ]; then
+    PASS=$((PASS + 1)); printf '  PASS  explicit --privacy on re-store overrides existing\n'
+else
+    FAIL=$((FAIL + 1)); printf '  FAIL  explicit --privacy override failed (got %s)\n' "$FM_PRIV_OVERRIDE" >&2
+fi
+
+# (4) first-store with no --privacy still defaults to family-internal.
+"$CLI" store "first-store-no-privacy body" --kind summary --topic first-store-default --slot smoke >/dev/null
+FSD_PATH="$VAULT/smoke/topics/first-store-default.md"
+FSD_PRIV="$(grep '^privacy:' "$FSD_PATH" | head -1 | awk '{print $2}')"
+if [ "$FSD_PRIV" = "family-internal" ]; then
+    PASS=$((PASS + 1)); printf '  PASS  first-store default privacy=family-internal\n'
+else
+    FAIL=$((FAIL + 1)); printf '  FAIL  first-store default privacy not family-internal (got %s)\n' "$FSD_PRIV" >&2
+fi
+
 # --- Summary. ----------------------------------------------------------------
 
 printf '\n=== summary ===\n'

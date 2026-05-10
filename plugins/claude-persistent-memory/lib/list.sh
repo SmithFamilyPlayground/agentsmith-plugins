@@ -9,6 +9,8 @@
 
 cpm_list() {
     local vault="$1" slot="$2" filter="$3"
+    # Path-traversal defense (Jax review HIGH-1).
+    _cpm_validate_id_segment list slot "$slot"
     local slot_dir="$vault/$slot"
     if [ ! -d "$slot_dir" ]; then
         cpm_die "list: slot '$slot' does not exist under $vault"

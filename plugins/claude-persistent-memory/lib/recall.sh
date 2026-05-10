@@ -16,6 +16,9 @@
 
 cpm_recall() {
     local vault="$1" slot="$2" scope="$3" query="$4"
+    # Path-traversal defense (Jax review HIGH-1). cpm_recall walks
+    # $slot_dir; a hostile slot like `..` would escape the vault.
+    _cpm_validate_id_segment recall slot "$slot"
     local slot_dir="$vault/$slot"
     if [ ! -d "$slot_dir" ]; then
         cpm_die "slot '$slot' does not exist under $vault"
