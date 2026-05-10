@@ -54,9 +54,18 @@ cpm_store() {
             ;;
         archive)
             id="$(cpm_safe_id)"
+            # Derive YYYY/MM from the id (which embeds the same UTC
+            # timestamp cpm_safe_id minted), NOT from a separate `date`
+            # call. The id format is `<YYYYMMDDTHHMMSSZ>-<rand>` — see
+            # cpm_safe_id in cli/local-vault.sh. A separate `date -u`
+            # call here would otherwise let a minute/hour/month
+            # boundary slip between the two reads and route the file
+            # into a YYYY/MM directory that the id doesn't reference;
+            # update.sh's id-recovery slicing would then look in the
+            # wrong place. Jax review LOW finding on PR #12.
             local yyyy mm
-            yyyy="$(date -u +"%Y")"
-            mm="$(date -u +"%m")"
+            yyyy="${id:0:4}"
+            mm="${id:4:2}"
             mkdir -p "$slot_dir/conversations/$yyyy/$mm"
             rel_path="$slot/conversations/$yyyy/$mm/$id.md"
             ;;

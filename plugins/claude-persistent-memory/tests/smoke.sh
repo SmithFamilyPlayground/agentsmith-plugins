@@ -449,6 +449,61 @@ else
     FAIL=$((FAIL + 1)); printf '  FAIL  first-store default privacy not family-internal (got %s)\n' "$FSD_PRIV" >&2
 fi
 
+printf '\n=== LOW: archive YYYY/MM derived from id (no TOCTOU) ===\n'
+
+# An archive store mints id `<YYYYMMDDTHHMMSSZ>-<rand>` and routes the
+# file to <slot>/conversations/<YYYY>/<MM>/. The fix derives YYYY/MM
+# from the id itself rather than re-reading `date`, so the on-disk
+# path must always agree with the id even if minute/hour/month bounds
+# tick between the calls. We can't easily race a real boundary in CI,
+# but we can prove the invariant: substring(id, 0, 4) and
+# substring(id, 4, 2) match the directory the file landed in.
+
+TOCTOU_ID="$("$CLI" store "toctou archive body" --kind archive --slot smoke)"
+TOCTOU_REL="$(echo "$TOCTOU_ID" | awk -F/ '{print $3}')"
+TOCTOU_YYYY="${TOCTOU_REL:0:4}"
+TOCTOU_MM="${TOCTOU_REL:4:2}"
+TOCTOU_PATH="$VAULT/smoke/conversations/$TOCTOU_YYYY/$TOCTOU_MM/$TOCTOU_REL.md"
+if [ -f "$TOCTOU_PATH" ]; then
+    PASS=$((PASS + 1)); printf '  PASS  archive landed in YYYY/MM derived from id\n'
+else
+    FAIL=$((FAIL + 1)); printf '  FAIL  archive id %s not at %s\n' "$TOCTOU_ID" "$TOCTOU_PATH" >&2
+fi
+
+# And `update` (which uses the same id-recovery slicing) must be able
+# to find the file by round-tripping the id.
+printf 'toctou updated body' | "$CLI" update "$TOCTOU_ID" >/dev/null
+TOCTOU_AFTER="$(cat "$TOCTOU_PATH")"
+assert_contains "update of archive by id round-trips" "toctou updated body" "$TOCTOU_AFTER"
+
+printf '\n=== LOW: update temp file written next to target; no leak on success ===\n'
+
+# After a successful update, no `.cpm-update.*` temp file should remain
+# in the target file's directory. (Pre-fix, mktemp wrote to /tmp and
+# was always cleaned by the trap; the fix moves the tmp adjacent to
+# the target so the rename is same-filesystem atomic — leftover temp
+# files in the same dir would mean the trap or rename is broken.)
+
+UPDATE_TARGET_DIR="$(dirname "$NOTE_FILE")"
+printf 'tmp-locality check body' | "$CLI" update "$NOTE_ID" >/dev/null
+LEFTOVER_COUNT="$(find "$UPDATE_TARGET_DIR" -maxdepth 1 -name '.cpm-update.*' -type f 2>/dev/null | wc -l | tr -d ' ')"
+if [ "$LEFTOVER_COUNT" = "0" ]; then
+    PASS=$((PASS + 1)); printf '  PASS  no .cpm-update.* temp file left after update\n'
+else
+    FAIL=$((FAIL + 1)); printf '  FAIL  %s .cpm-update.* leftover temp file(s) in %s\n' "$LEFTOVER_COUNT" "$UPDATE_TARGET_DIR" >&2
+fi
+
+# Also confirm that the post-fix update still leaves /tmp unaffected
+# by .cpm-update.* files from THIS run. (Defensive; pre-fix the temp
+# WOULD land in /tmp.) Scope to /tmp/.cpm-update.* glob just for this
+# test run.
+TMP_LEFTOVER="$(find /tmp -maxdepth 1 -name '.cpm-update.*' -newer "$WORK" -type f 2>/dev/null | wc -l | tr -d ' ')"
+if [ "$TMP_LEFTOVER" = "0" ]; then
+    PASS=$((PASS + 1)); printf '  PASS  update did not stage temp file in /tmp\n'
+else
+    FAIL=$((FAIL + 1)); printf '  FAIL  update staged %s temp file(s) in /tmp\n' "$TMP_LEFTOVER" >&2
+fi
+
 # --- Summary. ----------------------------------------------------------------
 
 printf '\n=== summary ===\n'

@@ -67,10 +67,16 @@ EOF
     # Pull existing frontmatter; rewrite body.
     local now
     now="$(cpm_iso_now)"
+    # Place tmp file alongside the target so `mv` is a same-filesystem
+    # rename (atomic) even when the vault lives on a different mount
+    # than /tmp (fly: tmpfs /tmp + volume-backed project is plausible).
+    # Also trap INT/TERM, not just EXIT — a Ctrl-C between mktemp and
+    # mv would otherwise leak the temp file. Jax review LOW finding
+    # on PR #12.
     local tmp
-    tmp="$(mktemp)"
+    tmp="$(mktemp -p "$(dirname "$abs_path")" .cpm-update.XXXXXX)"
     # shellcheck disable=SC2064
-    trap "rm -f '$tmp'" EXIT
+    trap "rm -f '$tmp'" EXIT INT TERM
 
     # Pass `patch` via ENVIRON to avoid awk's `-v` escape-sequence
     # rewriting (Jax review HIGH-3). With `-v patch="$patch"`, awk
@@ -109,7 +115,7 @@ EOF
         }
     ' "$abs_path" > "$tmp"
     mv "$tmp" "$abs_path"
-    trap - EXIT
+    trap - EXIT INT TERM
 
     if [ "$(cpm_commit_shape "$vault")" = "git" ]; then
         cpm_git_commit "$vault" "cpm(update): $memory_id" "$abs_path"
