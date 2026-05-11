@@ -136,17 +136,47 @@ EOF
 #   $1  subcommand label (for the error message)
 #   $2  segment name (slot/kind/id — for the error message)
 #   $3  the segment value
+#
+# NOTE on multiline bypass (Jax review HIGH on PR #12, second pass):
+# the prior implementation used `printf '%s' "$value" | grep -qE '^...$'`
+# which is LINE-oriented — grep matches per-line, so a value like
+# `"smoke\n../../outside"` passed validation because its first line
+# `"smoke"` matched the anchored regex while the traversal payload
+# rode in on the second line. Bash `[[ =~ ]]` matches against the
+# full string (no implicit per-line split) so it closes that gap.
+# We also reject any embedded newline explicitly *before* the regex
+# so the error message points at the actual problem rather than
+# "contains disallowed characters". LLM output is a routine source
+# of stray newlines — defence-in-depth here is cheap.
 _cpm_validate_id_segment() {
     local where="$1" name="$2" value="$3"
     if [ -z "$value" ]; then
         cpm_die "$where: empty $name segment in memory_id"
     fi
+    # Explicit newline rejection: clearer error than the regex would give,
+    # and a belt-and-braces guard against any future regex regression
+    # where the anchors don't behave the way we expect.
+    case "$value" in
+        *$'\n'*) cpm_die "$where: $name segment must not contain a newline" ;;
+    esac
     case "$value" in
         .|..) cpm_die "$where: $name segment must not be '.' or '..'" ;;
         .*)   cpm_die "$where: $name segment '$value' must not start with '.'" ;;
     esac
-    # Positive pattern: only [A-Za-z0-9._-] from start to end.
-    if ! printf '%s' "$value" | LC_ALL=C grep -qE '^[A-Za-z0-9._-]+$'; then
+    # Positive pattern: only [A-Za-z0-9._-] from start to end. Bash
+    # regex (not `grep -E`) so the match is whole-string, not per-line.
+    # The `+` quantifier also rejects empty (already caught above; this
+    # is a defensive second check).
+    #
+    # Locale: we pin LC_ALL=C for the duration of the test via a
+    # subshell so the character class `[A-Za-z0-9]` doesn't pick up
+    # locale-dependent extras under non-C locales (the original
+    # `grep -qE` form set LC_ALL=C explicitly; preserve that posture).
+    local _re_ok=0
+    if ( LC_ALL=C; [[ "$value" =~ ^[A-Za-z0-9._-]+$ ]] ); then
+        _re_ok=1
+    fi
+    if [ "$_re_ok" -ne 1 ]; then
         cpm_die "$where: $name segment '$value' contains disallowed characters (allowed: [A-Za-z0-9._-])"
     fi
 }

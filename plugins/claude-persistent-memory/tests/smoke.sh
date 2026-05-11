@@ -311,6 +311,135 @@ else
     FAIL=$((FAIL + 1)); printf '  FAIL  sentinel file was clobbered by traversal\n' >&2
 fi
 
+printf '\n=== HIGH-1b: multiline-value bypass (second-pass Jax finding) ===\n'
+
+# The first-pass fix validated each id segment with a line-oriented
+# `grep -qE '^...$'`. That's bypassed by a multi-line value: grep matches
+# per line, so `"clean\n../../outside"` PASSES because line 1 ("clean")
+# matches the regex. LLM output routinely carries stray newlines, making
+# this a realistic surface — not a theoretical one.
+#
+# Fix is bash regex `[[ =~ ]]` which matches whole-string. These assertions
+# cover the four caller surfaces that feed user input into the validator:
+# init --identity, store --slot, list --slot, and update <memory_id> (where
+# the newline rides in on one of the three segments after IFS='/' read).
+
+MULTILINE_SENTINEL="$WORK/MULTILINE_SHOULD_NOT_BE_TOUCHED"
+printf 'multiline-original\n' > "$MULTILINE_SENTINEL"
+MULTILINE_BEFORE="$(cat "$MULTILINE_SENTINEL")"
+
+# Case A: init --identity with embedded newline + traversal payload.
+ML_INIT_TARGET="$WORK/multiline-init-target"
+ml_identity=$'clean\n../../MULTILINE_SHOULD_NOT_BE_TOUCHED'
+if ML_A="$("$CLI" init --path "$ML_INIT_TARGET" --identity "$ml_identity" 2>&1)"; then
+    FAIL=$((FAIL + 1)); printf '  FAIL  init --identity with embedded newline should fail\n' >&2
+else
+    case "$ML_A" in
+        *newline*|*disallowed*|*"must not"*)
+            PASS=$((PASS + 1)); printf '  PASS  init --identity multiline rejected\n' ;;
+        *)
+            FAIL=$((FAIL + 1)); printf '  FAIL  init multiline error unclear: %s\n' "$ML_A" >&2 ;;
+    esac
+fi
+# init must not have created any directories under the throwaway target.
+# (Validator runs before any mkdir, so the target shouldn't exist at all;
+# but accept either "doesn't exist" or "exists and is empty" as proof
+# the validator fired before disk side-effects.)
+ml_init_leak=""
+if [ -d "$ML_INIT_TARGET" ]; then
+    ml_init_leak="$(find "$ML_INIT_TARGET" -mindepth 1 -maxdepth 3 2>/dev/null | head -1)"
+fi
+if [ -z "$ml_init_leak" ]; then
+    PASS=$((PASS + 1)); printf '  PASS  init multiline left no disk artefacts\n'
+else
+    FAIL=$((FAIL + 1)); printf '  FAIL  init multiline created disk artefact: %s\n' "$ml_init_leak" >&2
+fi
+
+# Case B: store --slot with embedded newline. Note: --slot is consumed
+# by cpm_store_cmd then passed to cpm_store which calls the validator
+# BEFORE the slot-directory existence check, so the error must come
+# from the validator (not from "slot does not exist").
+ml_slot=$'smoke\n../../MULTILINE_SHOULD_NOT_BE_TOUCHED'
+if ML_B="$("$CLI" store "body" --kind note --slot "$ml_slot" 2>&1)"; then
+    FAIL=$((FAIL + 1)); printf '  FAIL  store --slot multiline should fail\n' >&2
+else
+    case "$ML_B" in
+        *newline*|*disallowed*|*"must not"*)
+            PASS=$((PASS + 1)); printf '  PASS  store --slot multiline rejected\n' ;;
+        *)
+            FAIL=$((FAIL + 1)); printf '  FAIL  store --slot multiline error unclear: %s\n' "$ML_B" >&2 ;;
+    esac
+fi
+
+# Case C: list --slot with embedded newline.
+if ML_C="$("$CLI" list --slot "$ml_slot" 2>&1)"; then
+    FAIL=$((FAIL + 1)); printf '  FAIL  list --slot multiline should fail\n' >&2
+else
+    case "$ML_C" in
+        *newline*|*disallowed*|*"must not"*)
+            PASS=$((PASS + 1)); printf '  PASS  list --slot multiline rejected\n' ;;
+        *)
+            FAIL=$((FAIL + 1)); printf '  FAIL  list --slot multiline error unclear: %s\n' "$ML_C" >&2 ;;
+    esac
+fi
+
+# Case C2: recall --slot with embedded newline. Same validator chain
+# as list (cpm_recall calls _cpm_validate_id_segment before any disk
+# walk), but the dispatch path is different so worth its own assertion.
+if ML_C2="$("$CLI" recall "kickoff" --slot "$ml_slot" 2>&1)"; then
+    FAIL=$((FAIL + 1)); printf '  FAIL  recall --slot multiline should fail\n' >&2
+else
+    case "$ML_C2" in
+        *newline*|*disallowed*|*"must not"*)
+            PASS=$((PASS + 1)); printf '  PASS  recall --slot multiline rejected\n' ;;
+        *)
+            FAIL=$((FAIL + 1)); printf '  FAIL  recall --slot multiline error unclear: %s\n' "$ML_C2" >&2 ;;
+    esac
+fi
+
+# Case D: update <memory_id> with embedded newline in the id segment.
+# `IFS='/' read -r slot kind id` puts everything-after-the-second-/ into
+# `id`, so a newline embedded in the id (third segment) survives the
+# read and is then handed to _cpm_validate_id_segment.
+ml_memory_id=$'smoke/note/clean\n../../MULTILINE_SHOULD_NOT_BE_TOUCHED'
+if ML_D="$("$CLI" update "$ml_memory_id" "evil" 2>&1)"; then
+    FAIL=$((FAIL + 1)); printf '  FAIL  update memory_id with embedded newline should fail\n' >&2
+else
+    case "$ML_D" in
+        *newline*|*disallowed*|*malformed*|*"must not"*)
+            PASS=$((PASS + 1)); printf '  PASS  update memory_id multiline rejected\n' ;;
+        *)
+            FAIL=$((FAIL + 1)); printf '  FAIL  update memory_id multiline error unclear: %s\n' "$ML_D" >&2 ;;
+    esac
+fi
+
+# Case E: multiline newline in the SLOT segment of a memory_id (first
+# field after IFS=/ read). Confirms whole-id splitting also catches
+# newlines on the early segments. Use a leading slot with a newline +
+# traversal payload, then a benign kind/id.
+ml_memory_id_slot=$'clean\n../../MULTILINE_SHOULD_NOT_BE_TOUCHED/note/abc'
+if ML_E="$("$CLI" update "$ml_memory_id_slot" "evil" 2>&1)"; then
+    FAIL=$((FAIL + 1)); printf '  FAIL  update slot-segment newline should fail\n' >&2
+else
+    case "$ML_E" in
+        *newline*|*disallowed*|*malformed*|*"must not"*)
+            PASS=$((PASS + 1)); printf '  PASS  update slot-segment newline rejected\n' ;;
+        *)
+            FAIL=$((FAIL + 1)); printf '  FAIL  update slot-segment newline error unclear: %s\n' "$ML_E" >&2 ;;
+    esac
+fi
+
+# Sentinel must be byte-identical to before any of the multiline attempts.
+# (Content comparison is the authoritative safety property: any clobber
+# changes content, so this single check covers both "still exists" and
+# "still original bytes".)
+MULTILINE_AFTER="$(cat "$MULTILINE_SENTINEL")"
+if [ "$MULTILINE_BEFORE" = "$MULTILINE_AFTER" ]; then
+    PASS=$((PASS + 1)); printf '  PASS  multiline sentinel file untouched\n'
+else
+    FAIL=$((FAIL + 1)); printf '  FAIL  multiline sentinel file was clobbered\n' >&2
+fi
+
 printf '\n=== HIGH-2: git commit pathspec-scoped ===\n'
 
 # Operator pre-stages an unrelated file. cpm Store/Update must commit
