@@ -1,0 +1,15 @@
+{
+  "name": "agentsmith-api",
+  "description": "AgentSmith family API plugin — owns vault-IO, the Memory.* contract surface, the Dispatch.Agent surface, routes-cache, and the subagent-tools (ex-lifecycle) hook surface for sub-agents. Phase-2 MVP: bundled `memory.sh` and `vault-commit.sh` CLIs implementing the Memory.* contract against the AgentSmith vault (~/.secondbrain today-branch) plus a local-mode passthrough; `routes.sh` with bundled fallbacks for svc-unreachable; `dispatch.sh` as a filesystem-queue rendezvous for closed-set fix concerns; defensive + always-on subagent hooks shipped alongside the plugin. svc is a graceful fallback path, not a hard dependency. MCP server, HTTP round-trip to svc, and Haiku PII/secrets scan are deferred to Phase-2b.",
+  "version": "0.1.0-phase2a",
+  "keywords": [
+    "agentsmith",
+    "api",
+    "memory",
+    "vault-io",
+    "dispatch",
+    "routes",
+    "subagent-tools",
+    "lifecycle"
+  ]
+}
