@@ -1,0 +1,14 @@
+{
+  "name": "claude-persistent-memory",
+  "description": "Continuity-of-self memory for persistent-identity Claude Code agents. Phase-1a MVP: bundled `local-vault` CLI backing the Memory.* contract so the plugin works standalone on any project (no AgentSmith / no svc / no api dependency required); plugin scaffolding; standalone-mode `state` Memory.Store target recognized. Phase-1b will add the dreaming-model hooks (recall, consolidate-and-restart, context-pressure). Phase-1c will add auto-detection of an `agentsmith-api` backend (routes Memory.* to api when present; falls back to bundled CLI otherwise).",
+  "version": "0.1.0-phase1a",
+  "keywords": [
+    "memory",
+    "persistent-identity",
+    "state.md",
+    "continuity",
+    "local-vault",
+    "standalone",
+    "agentsmith"
+  ]
+}
