@@ -5,6 +5,20 @@ local supervisor process (the lifecycle service, separate process) nudge
 a long-running `claude` session about idle, context pressure, and
 external events without going through the user-facing telegram channel.
 
+> **Migration in progress (spec rev 8).** The v1 envelope contract
+> ([`2026-05-08-agentsmith-comms-api-contract.md`][spec-v1]) is rolling
+> out across three phases. Phase 0 (this PR) adds the test harness +
+> golden smoke against today's v0.0.1 rendering. Phase 1 lands the v1
+> envelope library + the v0.0.1 backward-compat shim under `lib/`.
+> Phase 3 **retires this MCP server** in favour of Claude Code
+> notification hooks (spec rev 8 §N, §X) — the `<channel
+> source="agentsmith-comms">` wrapper format and the four lifecycle
+> invariants stay; only the transport changes. The v0.0.1 inbound
+> shape documented below is preserved through the shim for the full
+> migration window (spec §9).
+>
+> [spec-v1]: https://github.com/SmithFamilyPlayground/AgentSmith/blob/main/docs/superpowers/specs/2026-05-08-agentsmith-comms-api-contract.md
+
 ## Why a second channel
 
 User-facing comms run through the `telegram` plugin (`@claude-plugins-official`).
@@ -62,3 +76,19 @@ echo '{"kind":"health_pulse"}' | nc -U ~/.claude/channels/agentsmith-comms/sock
 `mcp__agentsmith-comms__*` tools do **not** exist — the plugin is
 push-only. To respond, claude uses tools on other channels (typically
 `mcp__telegram__reply` for user-facing replies).
+
+## Tests
+
+Run the bun-test harness from the plugin root:
+
+```sh
+bun install
+bun test
+```
+
+`test/v001-shim.test.ts` is the golden smoke for today's v0.0.1
+rendering output (spec rev 8 §9). It spawns `server.ts` against a
+temp UDS, sends each of the four v0.0.1 inbound kinds, and locks the
+rendered `notifications/claude/channel` content byte-for-byte. The
+Phase 1 backward-compat shim and the Phase 3 `comms-render` CLI are
+measured against the same expectations.
