@@ -1,12 +1,12 @@
 ---
 name: fly
-description: Use when a Smith-family agent touches the `tod-smith` fly.io deployment — deploying, reading logs, reaching the machine, rotating secrets, understanding the persistence layout, triaging failures. AgentSmith-specific conventions — the always-on attachable invariant, the userspace-networking Tailscale topology, the SECONDBRAIN_* env prefix (VAULT_* is fly-reserved), and the bot-token uniqueness constraint across fly + home box.
+description: Use when a Smith-family agent touches the `agent-smith` fly.io deployment — deploying, reading logs, reaching the machine, rotating secrets, understanding the persistence layout, triaging failures. AgentSmith-specific conventions — the always-on attachable invariant, the userspace-networking Tailscale topology, the SECONDBRAIN_* env prefix (VAULT_* is fly-reserved), and the bot-token uniqueness constraint across fly + home box.
 ---
 
 # fly (AgentSmith)
 
 Claude Code doesn't have built-in knowledge of `fly` specific to our
-deployment. This skill covers everything AgentSmith — the `tod-smith`
+deployment. This skill covers everything AgentSmith — the `agent-smith`
 app's shape, why we built it this way, and the knobs that must not
 change without thinking.
 
@@ -32,19 +32,19 @@ to bind the per-host scope at `~/.doppler/config.yaml`. After
 bootstrap, `doppler run -- <cmd>` from anywhere inside the workspace
 injects the project's secrets — `FLY_API_TOKEN`, `GITHUB_TOKEN`,
 `TS_AUTHKEY`, telegram bot tokens, and the rest. The fly app name
-itself comes from `fly.toml` in cwd (`app = "tod-smith"`), so most
+itself comes from `fly.toml` in cwd (`app = "agent-smith"`), so most
 commands need to be run from `~/src/agent.smith/` or a subdir.
 
 If `doppler run -- fly status` fails with "App not specified" or an
 auth error, the bootstrap step hasn't been run on this host — fix it
-there. Don't paper over it by adding `--app tod-smith` or hand-exporting
+there. Don't paper over it by adding `--app agent-smith` or hand-exporting
 `FLY_API_TOKEN`; that defeats the point of having one wrapper.
 
 ## App anatomy
 
 | Property | Value | Why |
 |---|---|---|
-| App name | `tod-smith` | Also the fly hostname: `tod-smith.fly.dev`. |
+| App name | `agent-smith` | Also the fly hostname: `agent-smith.fly.dev`. (Renamed from `tod-smith` in PR #94 — the home-box systemd unit `tod-smith-agent@<agent>.service` did NOT rename.) |
 | Org | `personal` (Jimmy Smith) | Not the SmithFamilyPlayground GitHub org — fly orgs are separate. |
 | Region | `iad` | Closest to Jimmy; low-latency Telegram long-poll. |
 | VM | `shared-cpu-1x`, 1 GB RAM, 1 CPU | Cheap. Claude Code + Telegram long-poll fits comfortably; raise only if we add parallel subagent dispatch. |
@@ -86,7 +86,7 @@ doppler run -- fly secrets list
 |---|---|---|
 | `GITHUB_TOKEN` | Yes | Fine-grained PAT for `git pull` / `git push` on both AgentSmith + SecondBrain. Scoped read/write Contents + Metadata + PullRequests + Workflows; see `bootstrap/github-pat.sh`. |
 | `TELEGRAM_<AGENT>_BOT_TOKEN` | One per enabled agent | Uppercased agent name. `TELEGRAM_TOD_BOT_TOKEN` for Tod, etc. Entrypoint seeds each into `/data/claude/channels/telegram-<agent>/.env` on boot. |
-| `TS_AUTHKEY` | Optional but recommended | Tailscale auth key. If unset, Tailscale isn't started and the only shell path is `doppler run -- fly ssh console` (limited). With it, `ssh root@tod-smith-fly` from any tailnet device just works. |
+| `TS_AUTHKEY` | Optional but recommended | Tailscale auth key. If unset, Tailscale isn't started and the only shell path is `doppler run -- fly ssh console` (limited). With it, `ssh root@agent-smith-fly` from any tailnet device just works. |
 | `FLY_API_TOKEN` | Local Doppler config (not a runtime fly secret) | App-scoped deploy token. Lives in the `agent-smith` Doppler project's `prd` config; `doppler run --` injects it automatically. **Don't put it in a `.env` file** and don't hand-export it — the Doppler-scoped wrapper is the only blessed source. |
 
 **Not a secret**: `ANTHROPIC_API_KEY`. Intentionally absent. Agents authenticate via OAuth (`/login` inside the tmux session), creds persist on `/data/claude/.credentials.json`, survive restarts.
@@ -115,7 +115,7 @@ tailscaled \
 
 tailscale up \
   --authkey=$TS_AUTHKEY \
-  --hostname=tod-smith-fly \
+  --hostname=agent-smith-fly \
   --ssh \
   --accept-routes=false
 ```
@@ -124,7 +124,7 @@ Key facts:
 
 - **No TUN, no iptables, userspace-only.** Keeps the image simple and works on fly's shared infra. Tailscale SSH still works under userspace-networking.
 - **No OpenSSH server installed.** `openssh-client` is in the image for outbound `gh`/`git` flows; there is no inbound `sshd`. Tailscale SSH is the **only** inbound shell path.
-- **Hostname `tod-smith-fly`** — the MagicDNS name Jimmy's other tailnet devices resolve. Don't rename without updating operator docs and muscle memory.
+- **Hostname `agent-smith-fly`** — the MagicDNS name Jimmy's other tailnet devices resolve. Don't rename without updating operator docs and muscle memory.
 - **Gotcha**: `/usr/sbin` must be on `$PATH` in the image for `tailscaled` to launch (the binary is at `/usr/sbin/tailscaled`). Our Dockerfile ENV already covers this — captured as a fly gotcha because the slim node base image doesn't include it by default.
 
 ## Deploying
@@ -145,6 +145,74 @@ doppler run -- fly deploy --strategy=immediate --now
 
 `deploy.strategy = "immediate"` in `fly.toml` means the old machine is replaced in one step rather than blue/green — fine for a single-machine always-on deployment, and simpler to reason about.
 
+### Deploy verification (canary chain)
+
+Production deploys go through GitHub Actions
+(`.github/workflows/deploy-prod.yml`), not direct `fly deploy`. After
+the deploy step finishes, the workflow blocks until Tod has actually
+booted in the new container and self-checked. This is the canary
+chain — three pieces that need to stay in sync.
+
+1. **Build-time canary.** `Dockerfile` writes
+   `/app/.deploy-canary` with the build timestamp. Every fresh
+   container starts with the file present.
+2. **Tod's SessionStart hook removes it.**
+   `shared/hooks/post-deploy-selfcheck.sh` runs on Tod's first
+   session start in the new container. It runs three mechanical
+   checks (workspace `git rev-parse HEAD` resolves, telegram
+   state-dir `.env` is present, `claude --version` works) and
+   `rm -f`s the canary on success. On failure the canary is
+   preserved (and copied to `/app/.deploy-canary-FAILED-<ts>` for
+   later forensics). The hook is idempotent — sessions started in a
+   container with no canary are a no-op.
+3. **GHA polls for canary absence over `fly ssh`.** The
+   `Wait for canary removal` step in `deploy-prod.yml` issues a
+   non-interactive SSH cert with `flyctl ssh issue --agent root`
+   then loops `flyctl ssh console -C "test -e /app/.deploy-canary"`
+   for up to 10 minutes. First run that fails the `test -e` is the
+   green light; the workflow exits 0. Hitting the deadline emits
+   `::error::canary not removed within 10min` and exits 1.
+
+#### The two-token shape
+
+The canary-poll step requires a **second** fly token in addition to
+the deploy token, because deploy-scoped tokens cannot mint SSH
+certs. Both live as repo-scope GitHub Actions secrets, both must be
+minted under a personal fly account (deploy tokens can't mint
+either):
+
+| GHA secret | Scope | Used by | Mint command |
+|---|---|---|---|
+| `FLY_API_TOKEN` | deploy | the `flyctl deploy --remote-only` step | `fly tokens create deploy --app agent-smith` |
+| `FLY_SSH_TOKEN` | ssh | the `flyctl ssh issue --agent` + `flyctl ssh console` poll step | `fly tokens create ssh --app agent-smith` |
+
+The `--agent root` slug on `flyctl ssh issue` is mandatory in
+non-interactive contexts (the fly app's container runs as root, so
+the cert is issued for that user). Without it, flyctl prompts for a
+user slug and the GHA step hangs until timeout — this was the bug
+fixed in PR #96 / commit `b78bac8`. Don't drop the slug.
+
+#### Diagnosing a canary timeout
+
+When the workflow fails with `canary not removed within 10min`:
+
+1. Reach the machine via Tailscale SSH (`ssh root@agent-smith-fly`)
+   or `doppler run -- fly ssh console`.
+2. `cat /var/log/post-deploy-selfcheck.log` — shows which check
+   failed in Tod's selfcheck.
+3. `ls -la /app/.deploy-canary*` — if a `*-FAILED-*` copy exists,
+   the hook ran and explicitly preserved the canary. If only the
+   plain `.deploy-canary` exists, the hook never ran (Tod's session
+   may not have started — check `tmux list-sessions`).
+4. `tmux attach -t tod` and look at the pane — auth issues
+   (`/login` needed), missing telegram `.env`, or git pull failures
+   in the entrypoint all manifest as "session never reached
+   SessionStart."
+
+This SSH-poll path is interim. A follow-up issue tracks moving
+verification to a bearer-token-protected `/canary` HTTP route on
+`agentsmith-svc`, which would drop `FLY_SSH_TOKEN` entirely.
+
 ### Rollback
 
 ```bash
@@ -157,7 +225,7 @@ doppler run -- fly releases revert <N>
 **Tailscale SSH (preferred):**
 
 ```bash
-ssh root@tod-smith-fly
+ssh root@agent-smith-fly
 # then inside:
 tmux list-sessions
 tmux attach -t tod        # or jef, etc.
@@ -261,6 +329,6 @@ doppler run -- fly machine start <id>
 ## Related
 
 - `vault-commit` skill — how agents write SecondBrain. Runs inside these tmux sessions against `/data/secondbrain`.
-- `gh` skill — PR and CI flow for `tod-smith.fly.dev` releases driven by `fly/entrypoint.sh` + `fly.toml` changes.
+- `gh` skill — PR and CI flow for `agent-smith.fly.dev` releases driven by `fly/entrypoint.sh` + `fly.toml` changes.
 - `clean-gone` skill — irrelevant for fly's state but useful locally after many deploys.
 - Telegram gotchas memory — the triage matrix for MCP connection issues; especially gotcha #6 (bun-on-PATH), which blocked bring-up on the home box and is pre-solved in the fly Dockerfile.
